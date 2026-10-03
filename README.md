@@ -7,6 +7,9 @@ A Python package for redacting Personally Identifiable Information (PII) from te
 > [oMLX](https://github.com/lmstudio-ai), with **no torch, CUDA, or GPU required**.
 > The original `transformers` path is preserved and selected automatically when no
 > oMLX server is reachable.
+>
+> See **[CHANGES-vs-upstream.md](CHANGES-vs-upstream.md)** for a full comparison
+> against `OpenPipe/pii-redaction`.
 
 ## How the two backends work
 
@@ -79,10 +82,16 @@ The oMLX backend keeps one pooled `requests.Session` per thread, so connections
 are reused across concurrent calls.
 
 **Match the server:** oMLX caps parallelism with `scheduler.max_concurrent_requests`
-(default 8, `--max-concurrent-requests` on the CLI). Client concurrency above
-that just queues server-side, so set `--concurrency` to roughly the server's
-limit. Raise the server limit only if you have RAM headroom — higher values use
-more memory.
+(default 8; `--max-concurrent-requests` on the CLI, or the oMLX.app settings).
+Client concurrency above that just queues server-side, so set `--concurrency` to
+roughly the server's limit.
+
+On the oMLX.app GUI the value is applied **at server start** — raise it, then
+restart oMLX, and confirm it took (check `~/.omlx/settings.json`, or just watch
+whether throughput keeps climbing with more client workers). Raising it from 8 to
+32 on an M-series Mac roughly doubled throughput for short PII requests
+(~4.7 → ~7.9 req/s) before plateauing — MLX generation is memory-bandwidth bound,
+so past a certain point extra requests only add latency.
 
 ## Usage
 
@@ -105,11 +114,13 @@ Options:
 - `--omlx-model-general`: oMLX model name for the general model (default `PII-Redact-General`)
 - `--concurrency`: parallel inference requests (default 8 for omlx, 1 for transformers; env `PII_REDACT_CONCURRENCY`)
 - `--batch-size`: JSONL lines per concurrent batch (default `max(16, concurrency * 4)`)
+- `--max-tokens`: fixed generation budget per request (default 1024; env `PII_REDACT_MAX_TOKENS`)
+- `--auto-max-tokens`: auto-size the generation budget from each input's length — **needed for documents longer than ~1024 tokens**, since the model echoes the input back with tags
 - `--device`: Device for the `transformers` backend (e.g., cuda, cpu, mps)
 - PII handling modes (mutually exclusive):
   - `--tag`: Keep PII content between XML tags (default) `<PII:type>content</PII:type>`
   - `--redact`: Replace PII with just an empty tag `<PII:type/>`
-  - `--replace`: Replace PII with fake data `fake_data`
+  - `--replace`: Replace PII values with fake data — **tags are dropped**, e.g. `Terri Romero`
 - `--locale`: Locale for generating fake data (default: en_US, only used with --replace)
 
 #### Process text files
@@ -121,6 +132,29 @@ pii-redact process-text input.txt output.txt
 ```
 
 Options: same as `process-jsonl` above.
+
+#### Convert captured request traces to a redacted OpenAI JSONL
+
+If you have a trace log (one captured chat request per line — e.g. a gateway/proxy
+such as Plexus), this redacts every message and emits a standard OpenAI
+chat-completions JSONL:
+
+```bash
+pii-redact convert-traces traces.jsonl redacted_openai.jsonl
+```
+
+The request payload is auto-detected in `transformed_request`, `raw_request`,
+`request`, `body`, or `payload` (nested object or JSON-encoded string). Output is
+one `{"messages": [...]}` object per line. Default mode is `--redact`.
+
+Options:
+- `--request-field`: field holding the chat request (default: auto-detect)
+- `--keep-field`: copy a top-level record field into each output line (repeatable)
+- `--auto-max-tokens` / `--max-tokens`: generation budget (see below)
+
+Because a trace file repeats the same system prompt and conversation prefixes
+across requests, identical message contents are **deduplicated and redacted once**,
+then mapped back — often a >10x saving on real trace files.
 
 #### List the models served by oMLX
 
@@ -222,7 +256,7 @@ clean_dataset(
 **Multiple PII handling options**:
    - **Tag PII**: Identify and keep PII with XML tags like `<PII:email_address>john.doe@example.com</PII:email_address>`
    - **Redact PII**: Replace PII with just an empty tag like `<PII:email_address/>`
-   - **Replace PII**: Replace identified PII with realistic fake data like `<PII:email_address>jane.smith@example.org</PII:email_address>`
+   - **Replace PII**: Swap each PII value for realistic fake data, dropping the tags, e.g. `jane.smith@example.org`. (Note: unlike tag/redact, this mode emits no `<PII:...>` markup.)
 
 **Pluggable backends**: run locally with `transformers`/`torch`, or on Apple
 Silicon with MLX through an oMLX server — same API, same output.

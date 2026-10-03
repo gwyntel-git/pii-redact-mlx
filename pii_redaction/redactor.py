@@ -9,8 +9,10 @@ from enum import Enum
 from tqdm import tqdm
 from .faker_utils import FakePIIGenerator
 from .backends import (
+    DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_OMLX_BASE_URL,
     DEFAULT_OMLX_CONCURRENCY,
+    MAX_AUTO_NEW_TOKENS,
     BackendError,
     OMLXBackend,
     TransformersBackend,
@@ -23,7 +25,7 @@ class PIIHandlingMode(Enum):
 
     TAG = "tag"  # Keep PII content between XML tags: <PII:type>content</PII:type>
     REDACT = "redact"  # Replace PII with just an empty tag: <PII:type/>
-    REPLACE = "replace"  # Replace PII with fake data: <PII:type>fake_data</PII:type>
+    REPLACE = "replace"  # Replace PII values with fake data (tags are dropped)
 
 
 class PIIType(Enum):
@@ -230,6 +232,8 @@ class PIIRedactor:
         omlx_models=None,
         omlx_api_key=None,
         concurrency=None,
+        max_tokens=None,
+        auto_max_tokens=False,
     ):
         """
         Initialize the PIIRedactor with models for PII detection.
@@ -254,7 +258,19 @@ class PIIRedactor:
                 the PII_REDACT_CONCURRENCY environment variable. Model calls for all
                 (document, model) pairs are dispatched to a thread pool, so both
                 many documents and the two models per document run concurrently.
+            max_tokens (int): Fixed generation budget per request. ``None`` (default)
+                uses the backend default (1024). Ignored when ``auto_max_tokens`` is
+                True. Also read from the PII_REDACT_MAX_TOKENS environment variable.
+            auto_max_tokens (bool): Auto-size the generation budget per request from
+                the input length. The redaction models echo their input back with
+                tags, so the output is roughly as long as the input; the fixed 1024
+                default truncates anything longer. Use this for long documents.
         """
+
+        if max_tokens is None:
+            env = os.environ.get("PII_REDACT_MAX_TOKENS")
+            if env not in (None, ""):
+                max_tokens = int(env)
 
         self.model_paths = model_paths or [
             "OpenPipe/Pii-Redact-Name",
@@ -277,6 +293,8 @@ class PIIRedactor:
             backend or os.environ.get("PII_REDACT_BACKEND") or "auto"
         )
         self.concurrency = concurrency
+        self.max_tokens = max_tokens
+        self.auto_max_tokens = auto_max_tokens
 
         # Resolved on first model call: 'auto' -> 'omlx' or 'transformers'.
         self.backend = None
@@ -322,10 +340,15 @@ class PIIRedactor:
                     base_url=self.omlx_base_url,
                     api_key=self.omlx_api_key,
                     concurrency=self._resolve_concurrency(),
+                    max_tokens=None if self.auto_max_tokens else self.max_tokens,
                 )
             elif self.backend == "transformers":
                 self.models[index] = TransformersBackend(
-                    self.model_paths[index], device=self.device
+                    self.model_paths[index],
+                    device=self.device,
+                    max_new_tokens=(
+                        MAX_AUTO_NEW_TOKENS if self.auto_max_tokens else (self.max_tokens or DEFAULT_MAX_NEW_TOKENS)
+                    ),
                 )
             else:
                 raise ValueError(
@@ -346,7 +369,9 @@ class PIIRedactor:
         self._initialize_model(model_index)
         return self.models[model_index].tag(text)
 
-    def tag_pii_in_documents(self, documents, mode=PIIHandlingMode.TAG, locale="en_US"):
+    def tag_pii_in_documents(
+        self, documents, mode=PIIHandlingMode.TAG, locale="en_US", progress=False
+    ):
         """
         Process a list of documents to identify and handle PII according to the specified mode.
 
@@ -386,10 +411,18 @@ class PIIRedactor:
                     executor.submit(self._model_call, documents[di], mi): (di, mi)
                     for di, mi in tasks
                 }
-                for future in as_completed(future_to_task):
+                pending = as_completed(future_to_task)
+                if progress:
+                    pending = tqdm(
+                        pending, total=len(tasks), desc="tagging", unit="req"
+                    )
+                for future in pending:
                     outputs[future_to_task[future]] = future.result()
         else:
-            for di, mi in tasks:
+            iterator = tasks
+            if progress:
+                iterator = tqdm(iterator, total=len(tasks), desc="tagging", unit="req")
+            for di, mi in iterator:
                 outputs[(di, mi)] = self._model_call(documents[di], mi)
 
         processed_documents = []
@@ -417,6 +450,9 @@ def tag_pii_in_documents(
     omlx_models=None,
     omlx_api_key=None,
     concurrency=None,
+    max_tokens=None,
+    auto_max_tokens=False,
+    progress=False,
 ):
     """
     Convenience function to process a list of documents through a PII tagging model.
@@ -447,8 +483,12 @@ def tag_pii_in_documents(
         omlx_models=omlx_models,
         omlx_api_key=omlx_api_key,
         concurrency=concurrency,
+        max_tokens=max_tokens,
+        auto_max_tokens=auto_max_tokens,
     )
-    return redactor.tag_pii_in_documents(documents, mode=mode, locale=locale)
+    return redactor.tag_pii_in_documents(
+        documents, mode=mode, locale=locale, progress=progress
+    )
 
 
 def clean_dataset(
@@ -463,6 +503,8 @@ def clean_dataset(
     omlx_api_key=None,
     concurrency=None,
     batch_size=None,
+    max_tokens=None,
+    auto_max_tokens=False,
 ):
     """
     Reads a JSONL dataset and processes the 'content' field in each message.
@@ -499,6 +541,8 @@ def clean_dataset(
         omlx_models=omlx_models,
         omlx_api_key=omlx_api_key,
         concurrency=concurrency,
+        max_tokens=max_tokens,
+        auto_max_tokens=auto_max_tokens,
     )
 
     if batch_size is None:

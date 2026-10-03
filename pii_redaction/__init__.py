@@ -15,6 +15,7 @@ from .backends import (
     list_omlx_models,
 )
 from .faker_utils import FakePIIGenerator
+from .traces import convert_traces
 
 __all__ = [
     "tag_pii_in_documents",
@@ -24,6 +25,7 @@ __all__ = [
     "PIIRedactor",
     "PIIType",
     "FakePIIGenerator",
+    "convert_traces",
     "BackendError",
     "InferenceBackend",
     "TransformersBackend",

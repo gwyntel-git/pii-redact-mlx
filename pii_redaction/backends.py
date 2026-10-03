@@ -31,6 +31,19 @@ DEFAULT_OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://localhost:8000/v
 #: Generation budget, matching the transformers backend's ``max_new_tokens``.
 DEFAULT_MAX_NEW_TOKENS = 1024
 
+#: Upper bound used when the generation budget is auto-sized per request.
+MAX_AUTO_NEW_TOKENS = 16384
+
+#: Characters-per-token estimate for auto-sizing the generation budget. The
+#: redaction models echo the input back with tags, so output tokens ~= input
+#: tokens; this keeps the budget proportional to the prompt length.
+CHARS_PER_TOKEN = 3.0
+
+
+def _auto_max_tokens(text: str) -> int:
+    """Estimate a generation budget that can echo ``text`` back with tags."""
+    return min(max(512, int(len(text) / CHARS_PER_TOKEN) + 256), MAX_AUTO_NEW_TOKENS)
+
 #: Default number of in-flight requests when the oMLX backend is used.
 DEFAULT_OMLX_CONCURRENCY = 8
 
@@ -61,7 +74,7 @@ class TransformersBackend(InferenceBackend):
 
     name = "transformers"
 
-    def __init__(self, model_path: str, device: Optional[str] = None):
+    def __init__(self, model_path: str, device: Optional[str] = None, max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS):
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -77,6 +90,7 @@ class TransformersBackend(InferenceBackend):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="left")
         self.tokenizer.padding_side = "left"
         self._lock = threading.Lock()
+        self.max_new_tokens = max_new_tokens
 
         if device:
             self.model = self.model.to(device)
@@ -104,7 +118,7 @@ class TransformersBackend(InferenceBackend):
             outputs = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
+                max_new_tokens=self.max_new_tokens,
                 pad_token_id=tokenizer.eos_token_id,
             )
 
@@ -130,7 +144,7 @@ class OMLXBackend(InferenceBackend):
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         timeout: float = 300.0,
-        max_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+        max_tokens: Optional[int] = DEFAULT_MAX_NEW_TOKENS,
         concurrency: int = DEFAULT_OMLX_CONCURRENCY,
     ):
         try:
@@ -177,10 +191,13 @@ class OMLXBackend(InferenceBackend):
 
     def tag(self, text: str) -> str:
         url = f"{self.base_url}/chat/completions"
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = _auto_max_tokens(text)
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": text}],
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens,
             "temperature": 0,
             "stream": False,
         }
