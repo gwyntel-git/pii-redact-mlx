@@ -40,6 +40,13 @@ def add_backend_args(parser):
         help="oMLX model name for the general model (default: PII-Redact-General)",
     )
     parser.add_argument(
+        "--omlx-api-key-file",
+        default=None,
+        help="Path to a file containing the oMLX API key. Preferred over passing "
+        "the key directly: keeps it out of shell history and process listings. "
+        "(env: OMLX_API_KEY_FILE)",
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=None,
@@ -170,8 +177,19 @@ def main():
         help="oMLX OpenAI-compatible base URL "
         f"(default: $OMLX_BASE_URL or {DEFAULT_OMLX_BASE_URL})",
     )
+    list_parser.add_argument(
+        "--omlx-api-key-file",
+        default=None,
+        help="Path to a file containing the oMLX API key. (env: OMLX_API_KEY_FILE)",
+    )
 
     args = parser.parse_args()
+
+    # Turn a key file into the env var the backend resolver reads, so the key
+    # itself never appears as an argument value.
+    key_file = getattr(args, "omlx_api_key_file", None)
+    if key_file:
+        os.environ["OMLX_API_KEY_FILE"] = key_file
 
     try:
         if args.command == "process-jsonl":

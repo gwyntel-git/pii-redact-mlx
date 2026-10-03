@@ -52,6 +52,37 @@ class BackendError(RuntimeError):
     """Raised when a backend cannot be initialized or a generation call fails."""
 
 
+def resolve_api_key(api_key: Optional[str] = None) -> Optional[str]:
+    """Resolve the oMLX API key without ever requiring it on the command line.
+
+    Precedence: an explicit argument, then ``OMLX_API_KEY``, then the stripped
+    contents of the file named by ``OMLX_API_KEY_FILE``. Pointing at a file keeps
+    the secret out of shell history, process listings, and chat.
+    """
+    if api_key:
+        return api_key
+    env_key = os.environ.get("OMLX_API_KEY")
+    if env_key:
+        return env_key
+    key_file = os.environ.get("OMLX_API_KEY_FILE")
+    if key_file:
+        try:
+            with open(key_file) as fh:
+                return fh.read().strip() or None
+        except OSError:
+            return None
+    return None
+
+
+def auth_headers(api_key: Optional[str] = None) -> dict:
+    """Return JSON + bearer auth headers for the oMLX API."""
+    headers = {"Content-Type": "application/json"}
+    key = resolve_api_key(api_key)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
 class InferenceBackend:
     """Minimal interface every backend implements."""
 
@@ -161,7 +192,7 @@ class OMLXBackend(InferenceBackend):
         self._HTTPAdapter = HTTPAdapter
         self.model = model
         self.base_url = (base_url or DEFAULT_OMLX_BASE_URL).rstrip("/")
-        self.api_key = api_key or os.environ.get("OMLX_API_KEY")
+        self.api_key = resolve_api_key(api_key)
         self.timeout = timeout
         self.max_tokens = max_tokens
         self.concurrency = max(1, int(concurrency))
@@ -169,10 +200,7 @@ class OMLXBackend(InferenceBackend):
 
     @property
     def _headers(self):
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
+        return auth_headers(self.api_key)
 
     def _session(self):
         """Return this thread's ``requests.Session``, creating it on first use."""
@@ -238,7 +266,7 @@ def omlx_server_available(
 
     url = (base_url or DEFAULT_OMLX_BASE_URL).rstrip("/") + "/models"
     try:
-        response = requests.get(url, timeout=timeout)
+        response = requests.get(url, headers=auth_headers(), timeout=timeout)
         return response.status_code == 200
     except Exception:
         return False
@@ -254,6 +282,12 @@ def list_omlx_models(base_url: Optional[str] = None, timeout: float = 5.0):
         ) from exc
 
     url = (base_url or DEFAULT_OMLX_BASE_URL).rstrip("/") + "/models"
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
+    try:
+        response = requests.get(url, headers=auth_headers(), timeout=timeout)
+        response.raise_for_status()
+    except Exception as exc:
+        raise BackendError(
+            f"Could not list models from {url}: {exc}. If the server requires "
+            "auth, pass --omlx-api-key-file <path> (or set OMLX_API_KEY_FILE)."
+        ) from exc
     return [m["id"] for m in response.json().get("data", [])]

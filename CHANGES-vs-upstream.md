@@ -106,6 +106,20 @@ The fork adds:
 
 Default remains 1024, matching upstream, when neither flag is given.
 
+## 3a. File-based API key
+
+oMLX can be configured to require a bearer token. To avoid putting the secret on
+the command line (where it lands in shell history and `ps` output), the CLI reads
+it from a **file**:
+
+```
+printf '%s' "$KEY" > ~/.omlx/api_key && chmod 600 ~/.omlx/api_key
+pii-redact list-models --omlx-url http://localhost:27473/v1 --omlx-api-key-file ~/.omlx/api_key
+```
+
+Resolution order is `--omlx-api-key-file` (→ `OMLX_API_KEY_FILE`) → `OMLX_API_KEY`
+→ none. The key file is a plain path; the key value is never an argv entry.
+
 ## 4. `convert-traces` — trace JSONL → redacted OpenAI JSONL
 
 New command for the pipeline this fork was written for: a gateway/proxy trace log
@@ -163,7 +177,7 @@ from the package root.
 | Setting | Env var | CLI flag | Default |
 |---|---|---|---|
 | oMLX base URL | `OMLX_BASE_URL` | `--omlx-url` | `http://localhost:8000/v1` |
-| oMLX API key | `OMLX_API_KEY` | `--omlx-api-key` | none |
+| oMLX API key | `OMLX_API_KEY` / `OMLX_API_KEY_FILE` | `--omlx-api-key-file` | none |
 | Backend | `PII_REDACT_BACKEND` | `--backend` | `auto` |
 | Concurrency | `PII_REDACT_CONCURRENCY` | `--concurrency` | 8 (omlx) / 1 (transformers) |
 
