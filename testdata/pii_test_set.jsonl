@@ -1,0 +1,18 @@
+{"id": "t01", "text": "Hi, my name is Sarah Chen and you can reach me at sarah.chen@example.com.", "expected": [["person_name", "Sarah Chen"], ["email_address", "sarah.chen@example.com"]]}
+{"id": "t02", "text": "My social security number is 219-09-9999 and I need it updated.", "expected": [["personal_id", "219-09-9999"]]}
+{"id": "t03", "text": "Please call Michael Rodriguez at (555) 867-5309 tomorrow morning.", "expected": [["person_name", "Michael Rodriguez"], ["phone_number", "(555) 867-5309"]]}
+{"id": "t04", "text": "She works at Northwind Trading Company as a logistics manager.", "expected": [["organization_name", "Northwind Trading Company"]]}
+{"id": "t05", "text": "Ship the package to 742 Evergreen Terrace by Friday.", "expected": [["street_address", "742 Evergreen Terrace"]]}
+{"id": "t06", "text": "The card on file is 4111 1111 1111 1111 and it expires soon.", "expected": [["credit_card_info", "4111 1111 1111 1111"]]}
+{"id": "t07", "text": "Dr. Amelia Okafor reviewed the file yesterday.", "expected": [["person_name", "Amelia Okafor"]]}
+{"id": "t08", "text": "Contact Priya Nair at priya.nair@example.org or Tomas Alvarez at tomas@example.net.", "expected": [["person_name", "Priya Nair"], ["email_address", "priya.nair@example.org"], ["person_name", "Tomas Alvarez"], ["email_address", "tomas@example.net"]]}
+{"id": "t09", "text": "I was born on 1985-03-12 in Denver.", "expected": [["date_of_birth", "1985-03-12"]]}
+{"id": "t10", "text": "His bank account number is 000123456789 at First National Bank.", "expected": [["banking_number", "000123456789"], ["organization_name", "First National Bank"]]}
+{"id": "t11", "text": "The quarterly report shows a 12 percent increase in renewable energy adoption across the region.", "expected": []}
+{"id": "t12", "text": "My email is j.smith@example.com and my phone is 555-0100.", "expected": [["email_address", "j.smith@example.com"], ["phone_number", "555-0100"]]}
+{"id": "t13", "text": "Elizabeth Montgomery-Scott is the CEO of Vandelay Industries.", "expected": [["person_name", "Elizabeth Montgomery-Scott"], ["organization_name", "Vandelay Industries"]]}
+{"id": "t14", "text": "The cat sat on the mat while the rain fell steadily on the roof.", "expected": []}
+{"id": "t15", "text": "The patient, Mr. Harold Jenkins, was seen at St. Mary's Hospital.", "expected": [["person_name", "Harold Jenkins"], ["organization_name", "St. Mary's Hospital"]]}
+{"id": "t16", "text": "Reach our support team at support@example.com or call 1-800-555-0199.", "expected": [["email_address", "support@example.com"], ["phone_number", "1-800-555-0199"]]}
+{"id": "t17", "text": "Maria Gonzalez moved to 1600 Pennsylvania Avenue last spring.", "expected": [["person_name", "Maria Gonzalez"], ["street_address", "1600 Pennsylvania Avenue"]]}
+{"id": "t18", "text": "The new policy takes effect on January 1 and applies to all staff members.", "expected": []}

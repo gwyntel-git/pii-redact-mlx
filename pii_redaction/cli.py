@@ -30,14 +30,14 @@ def add_backend_args(parser):
     )
     parser.add_argument(
         "--omlx-model-name",
-        default="PII-Redact-Name",
+        default="PII-Redact-Name-oQ4",
         help="oMLX model name for the person/organization model "
-        "(default: PII-Redact-Name)",
+        "(default: PII-Redact-Name-oQ4)",
     )
     parser.add_argument(
         "--omlx-model-general",
-        default="PII-Redact-General",
-        help="oMLX model name for the general model (default: PII-Redact-General)",
+        default="PII-Redact-General-oQ4",
+        help="oMLX model name for the general model (default: PII-Redact-General-oQ4)",
     )
     parser.add_argument(
         "--omlx-api-key-file",

@@ -172,6 +172,30 @@ from the package root.
 
 ---
 
+## 7. Default models: the oQ4 MLX quants
+
+The oMLX backend defaults to the 4-bit MLX quants of the same checkpoints —
+`PII-Redact-Name-oQ4` and `PII-Redact-General-oQ4` (~726 MB each, vs ~2.5 GB full
+precision), from `gwyntel/PII-Redact-*-oQ4` on HuggingFace. Full precision stays
+reachable via `--omlx-model-name` / `--omlx-model-general`.
+
+oMLX ids are the **leaf directory name** under `model_dir`, so a model at
+`~/.omlx/models/PII-Redact-Name-oQ4` is served as `PII-Redact-Name-oQ4`
+(and one nested at `gwyntel/<name>` still serves as `<name>` — the `gwyntel/`
+prefix is not part of the id).
+
+## 8. Validation
+
+`testdata/pii_test_set.jsonl` — 18 documents carrying ground-truth PII spans
+(synthetic: `example.com`, 555 numbers). `scripts/validate.py` runs a configuration
+in TAG mode and scores its spans against those labels (overall + per tag).
+
+Measured on the oQ4 quants: **P=0.83, R=0.77, F1=0.80**. Names, emails, date of
+birth exact; organization and street address near-complete. Not tagged in this
+run: phone numbers (0/3), a bank account number, and a credit-card number the
+models labelled `personal_id`. Those are the models' own tagging choices; full
+precision was not run as a reference.
+
 ## Configuration
 
 | Setting | Env var | CLI flag | Default |

@@ -15,7 +15,7 @@ A Python package for redacting Personally Identifiable Information (PII) from te
 
 | Backend | What it does | Needs |
 | --- | --- | --- |
-| `omlx` | Sends each document to an oMLX OpenAI-compatible server (`/v1/chat/completions`). oMLX runs `PII-Redact-Name` / `PII-Redact-General` through **MLX** on Apple Silicon. | a running oMLX server, `requests` |
+| `omlx` | Sends each document to an oMLX OpenAI-compatible server (`/v1/chat/completions`). oMLX runs the `PII-Redact-*-oQ4` MLX quants through **MLX** on Apple Silicon. | a running oMLX server, `requests` |
 | `transformers` | The original OpenPipe path: loads the checkpoints locally with `transformers` + `torch` and generates with `model.generate`. | `transformers`, `torch` |
 
 Backend selection is `auto` by default: if an oMLX server answers on the configured
@@ -289,6 +289,29 @@ The model can identify and tag the following PII categories:
 - password: a secure string used for authentication
 - secure_credential: any secure credential like an API key, private key, 2FA token
 - religious_affiliation: anything that identifies religious affiliation
+
+## Models & validation
+
+The oMLX backend defaults to the **oQ4 MLX quants** — `PII-Redact-Name-oQ4` and
+`PII-Redact-General-oQ4` (~726 MB each, vs ~2.5 GB full precision). Select others
+with `--omlx-model-name` / `--omlx-model-general`.
+
+`testdata/pii_test_set.jsonl` is a small labelled set (18 documents, synthetic
+PII — `example.com` addresses and 555 numbers). Validate any configuration
+against it:
+
+```bash
+python scripts/validate.py --omlx-api-key-file ~/.omlx/api_key
+```
+
+Measured on the oQ4 quants (scores are span precision/recall/F1 against the
+labels): overall **P=0.83, R=0.77, F1=0.80**.
+person_name 8/8, email_address 5/5, date_of_birth 1/1, organization_name 3/4,
+street_address 2/3, personal_id 1/1 but with a spurious extra.
+Not tagged in this run: phone_number (0/3), banking_number (0/1), and a
+credit-card number was labelled `personal_id` rather than `credit_card_info`.
+Those gaps are the models' own tagging behaviour; a full-precision reference
+was not measured.
 
 ## License
 

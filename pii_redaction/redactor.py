@@ -164,6 +164,12 @@ def merge_overlapping_spans(annotations):
 def apply_tags(
     original, tagged_strings, tags_to_include, mode=PIIHandlingMode.TAG, locale="en_US"
 ):
+    # Accept the string form ("tag"/"redact"/"replace") as well as the enum.
+    # Without this a string mode matches no branch below and the document is
+    # returned UNCHANGED -- a silent no-op that would emit unredacted PII.
+    if isinstance(mode, str):
+        mode = PIIHandlingMode(mode)
+
     candidate_annotations = []
 
     for tstr, include_tags in zip(tagged_strings, tags_to_include):
@@ -277,8 +283,8 @@ class PIIRedactor:
             "OpenPipe/Pii-Redact-General",
         ]
         self.omlx_models = omlx_models or [
-            "PII-Redact-Name",
-            "PII-Redact-General",
+            "PII-Redact-Name-oQ4",
+            "PII-Redact-General-oQ4",
         ]
         self.focus_tags = focus_tags or (
             [["person_name", "organization_name"]] + [None] * (len(self.model_paths) - 1)
