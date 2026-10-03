@@ -190,11 +190,18 @@ prefix is not part of the id).
 (synthetic: `example.com`, 555 numbers). `scripts/validate.py` runs a configuration
 in TAG mode and scores its spans against those labels (overall + per tag).
 
-Measured on the oQ4 quants: **P=0.83, R=0.77, F1=0.80**. Names, emails, date of
-birth exact; organization and street address near-complete. Not tagged in this
-run: phone numbers (0/3), a bank account number, and a credit-card number the
-models labelled `personal_id`. Those are the models' own tagging choices; full
-precision was not run as a reference.
+Measured on the oQ4 quants with full precision as a reference on the same set:
+
+```
+full precision   P=0.909  R=0.769  F1=0.833   (tp=20 fp=2 fn=6)
+oQ4 quant        P=0.870  R=0.769  F1=0.816   (tp=20 fp=3 fn=6)
+```
+
+Identical recall; the quant adds one spurious span (and quant output varies
+run-to-run at temperature 0, F1 ~0.80-0.82, so one span is within noise). Both
+configs miss the same items — phone numbers, a bank account number — and both
+label a credit-card number `personal_id`, so those are the models' tagging
+behaviour rather than quantisation damage.
 
 ## Configuration
 

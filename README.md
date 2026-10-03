@@ -304,14 +304,20 @@ against it:
 python scripts/validate.py --omlx-api-key-file ~/.omlx/api_key
 ```
 
-Measured on the oQ4 quants (scores are span precision/recall/F1 against the
-labels): overall **P=0.83, R=0.77, F1=0.80**.
-person_name 8/8, email_address 5/5, date_of_birth 1/1, organization_name 3/4,
-street_address 2/3, personal_id 1/1 but with a spurious extra.
-Not tagged in this run: phone_number (0/3), banking_number (0/1), and a
-credit-card number was labelled `personal_id` rather than `credit_card_info`.
-Those gaps are the models' own tagging behaviour; a full-precision reference
-was not measured.
+Measured on the oQ4 quants, with full precision as a reference on the same 18
+documents (span precision/recall/F1 against the labels):
+
+```
+full precision   P=0.909  R=0.769  F1=0.833   (tp=20 fp=2 fn=6)
+oQ4 quant        P=0.870  R=0.769  F1=0.816   (tp=20 fp=3 fn=6)
+```
+
+Recall is identical and both find the same 20 spans; the quant adds one spurious
+span. Quant output varies slightly run-to-run even at temperature 0 (F1 observed
+0.80–0.82), so a one-span gap is within noise. Both configurations miss the same
+items — phone numbers (0/3) and a bank account number, and both label a
+credit-card number `personal_id` — so those are the models' own tagging
+behaviour, not quantisation damage.
 
 ## License
 
