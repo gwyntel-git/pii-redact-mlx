@@ -60,6 +60,30 @@ export OMLX_BASE_URL=http://localhost:8000/v1
 …or pass `--omlx-url` on the command line. With the server running, the default
 `--backend auto` picks MLX automatically.
 
+## Concurrency
+
+Inference requests run in parallel. Every `(document, model)` pair is dispatched
+to a thread pool, so both many documents and the two models per document are
+processed at once. Results are reassembled in document order, so **output is
+identical to the sequential path**.
+
+- Default: **8** parallel requests for the `omlx` backend, **1** for
+  `transformers` (a single torch model is not reentrant, so its `generate` calls
+  are serialized behind a lock).
+- Override with `--concurrency N` or the `PII_REDACT_CONCURRENCY` env var.
+- `process-jsonl` reads lines in batches (`--batch-size`, default
+  `max(16, concurrency * 4)`) and tags every message in a batch in one call,
+  flushing after each batch.
+
+The oMLX backend keeps one pooled `requests.Session` per thread, so connections
+are reused across concurrent calls.
+
+**Match the server:** oMLX caps parallelism with `scheduler.max_concurrent_requests`
+(default 8, `--max-concurrent-requests` on the CLI). Client concurrency above
+that just queues server-side, so set `--concurrency` to roughly the server's
+limit. Raise the server limit only if you have RAM headroom — higher values use
+more memory.
+
 ## Usage
 
 ### Command Line Interface
@@ -79,6 +103,8 @@ Options:
 - `--omlx-url`: oMLX base URL, e.g. `http://localhost:8000/v1` (env: `OMLX_BASE_URL`)
 - `--omlx-model-name`: oMLX model name for the person/organization model (default `PII-Redact-Name`)
 - `--omlx-model-general`: oMLX model name for the general model (default `PII-Redact-General`)
+- `--concurrency`: parallel inference requests (default 8 for omlx, 1 for transformers; env `PII_REDACT_CONCURRENCY`)
+- `--batch-size`: JSONL lines per concurrent batch (default `max(16, concurrency * 4)`)
 - `--device`: Device for the `transformers` backend (e.g., cuda, cpu, mps)
 - PII handling modes (mutually exclusive):
   - `--tag`: Keep PII content between XML tags (default) `<PII:type>content</PII:type>`
@@ -164,12 +190,13 @@ anonymized_documents = tag_pii_in_documents(
     locale="en_US",
 )
 
-# Force the MLX/oMLX backend explicitly
+# Force the MLX/oMLX backend explicitly, 16 requests in parallel
 tagged = tag_pii_in_documents(
     documents,
     mode=PIIHandlingMode.TAG,
     backend="omlx",
     omlx_base_url="http://localhost:8000/v1",
+    concurrency=16,
 )
 
 # Process a JSONL dataset
@@ -188,6 +215,7 @@ clean_dataset(
 - `OMLX_BASE_URL` — default oMLX base URL (default `http://localhost:8000/v1`)
 - `OMLX_API_KEY` — optional bearer token sent to the oMLX server
 - `PII_REDACT_BACKEND` — default backend (`auto`, `transformers`, or `omlx`)
+- `PII_REDACT_CONCURRENCY` — default number of parallel inference requests
 
 #### Key Features
 

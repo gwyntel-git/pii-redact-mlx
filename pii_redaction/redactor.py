@@ -1,13 +1,16 @@
 import re
 import json
-from tqdm import tqdm
 import os
-from collections import defaultdict
 import difflib
+import threading
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
+from tqdm import tqdm
 from .faker_utils import FakePIIGenerator
 from .backends import (
     DEFAULT_OMLX_BASE_URL,
+    DEFAULT_OMLX_CONCURRENCY,
     BackendError,
     OMLXBackend,
     TransformersBackend,
@@ -226,6 +229,7 @@ class PIIRedactor:
         omlx_base_url=None,
         omlx_models=None,
         omlx_api_key=None,
+        concurrency=None,
     ):
         """
         Initialize the PIIRedactor with models for PII detection.
@@ -244,6 +248,12 @@ class PIIRedactor:
             omlx_models (list): oMLX model names, one per entry in model_paths.
             omlx_api_key (str): Optional bearer token for the oMLX server. Falls back
                 to the OMLX_API_KEY environment variable.
+            concurrency (int): Number of inference requests to run in parallel.
+                ``None`` (default) resolves to ``DEFAULT_OMLX_CONCURRENCY`` (8) for
+                the oMLX backend and 1 for the transformers backend. Also read from
+                the PII_REDACT_CONCURRENCY environment variable. Model calls for all
+                (document, model) pairs are dispatched to a thread pool, so both
+                many documents and the two models per document run concurrently.
         """
 
         self.model_paths = model_paths or [
@@ -266,12 +276,15 @@ class PIIRedactor:
         self.requested_backend = (
             backend or os.environ.get("PII_REDACT_BACKEND") or "auto"
         )
+        self.concurrency = concurrency
 
         # Resolved on first model call: 'auto' -> 'omlx' or 'transformers'.
         self.backend = None
 
         # Lazily-initialized inference backends, one per model role.
         self.models: list = [None] * len(self.model_paths)
+        # Guards one-time lazy initialization across concurrent callers.
+        self._init_lock = threading.Lock()
 
     def _resolve_backend(self):
         """Resolve the 'auto' backend choice to a concrete backend name."""
@@ -279,28 +292,45 @@ class PIIRedactor:
             return "omlx" if omlx_server_available(self.omlx_base_url) else "transformers"
         return self.requested_backend
 
+    def _resolve_concurrency(self):
+        """Resolve the effective concurrency (falls back per backend)."""
+        value = self.concurrency
+        if value is None:
+            env = os.environ.get("PII_REDACT_CONCURRENCY")
+            if env not in (None, ""):
+                value = int(env)
+        if value is None:
+            backend = self.backend or self._resolve_backend()
+            value = DEFAULT_OMLX_CONCURRENCY if backend == "omlx" else 1
+        return max(1, int(value))
+
     def _initialize_model(self, index):
         """Initialize a specific model backend if it hasn't been already."""
         if self.models[index] is not None:
             return
 
-        if self.backend is None:
-            self.backend = self._resolve_backend()
+        with self._init_lock:
+            if self.models[index] is not None:
+                return
 
-        if self.backend == "omlx":
-            self.models[index] = OMLXBackend(
-                model=self.omlx_models[index],
-                base_url=self.omlx_base_url,
-                api_key=self.omlx_api_key,
-            )
-        elif self.backend == "transformers":
-            self.models[index] = TransformersBackend(
-                self.model_paths[index], device=self.device
-            )
-        else:
-            raise ValueError(
-                f"Unknown backend {self.backend!r}: choose 'auto', 'transformers' or 'omlx'."
-            )
+            if self.backend is None:
+                self.backend = self._resolve_backend()
+
+            if self.backend == "omlx":
+                self.models[index] = OMLXBackend(
+                    model=self.omlx_models[index],
+                    base_url=self.omlx_base_url,
+                    api_key=self.omlx_api_key,
+                    concurrency=self._resolve_concurrency(),
+                )
+            elif self.backend == "transformers":
+                self.models[index] = TransformersBackend(
+                    self.model_paths[index], device=self.device
+                )
+            else:
+                raise ValueError(
+                    f"Unknown backend {self.backend!r}: choose 'auto', 'transformers' or 'omlx'."
+                )
 
     def _model_call(self, text, model_index):
         """
@@ -320,6 +350,11 @@ class PIIRedactor:
         """
         Process a list of documents to identify and handle PII according to the specified mode.
 
+        Inference calls for every (document, model) pair are dispatched to a thread
+        pool sized by the resolved concurrency, so many documents -- and the two
+        models per document -- run in parallel. Results are reassembled in document
+        order, so output is identical to the sequential path.
+
         Args:
             documents (list): List of text documents to process.
             mode (PIIHandlingMode): How to handle identified PII:
@@ -331,17 +366,41 @@ class PIIRedactor:
         Returns:
             list: List of documents with PII handled according to the specified mode.
         """
+        documents = list(documents)
+        if not documents:
+            return []
+
+        num_models = len(self.model_paths)
+        tasks = [
+            (doc_index, model_index)
+            for doc_index in range(len(documents))
+            for model_index in range(num_models)
+        ]
+
+        concurrency = self._resolve_concurrency()
+        outputs = {}
+
+        if concurrency > 1 and len(tasks) > 1:
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                future_to_task = {
+                    executor.submit(self._model_call, documents[di], mi): (di, mi)
+                    for di, mi in tasks
+                }
+                for future in as_completed(future_to_task):
+                    outputs[future_to_task[future]] = future.result()
+        else:
+            for di, mi in tasks:
+                outputs[(di, mi)] = self._model_call(documents[di], mi)
+
         processed_documents = []
-
-        for doc in documents:
-            model_outputs = []
-
-            for idx in range(len(self.model_paths)):
-                model_output = self._model_call(doc, idx)
-                model_outputs.append(model_output)
-
+        for doc_index in range(len(documents)):
+            model_outputs = [outputs[(doc_index, mi)] for mi in range(num_models)]
             processed_doc = apply_tags(
-                doc, model_outputs, self.focus_tags, mode=mode, locale=locale
+                documents[doc_index],
+                model_outputs,
+                self.focus_tags,
+                mode=mode,
+                locale=locale,
             )
             processed_documents.append(processed_doc)
 
@@ -356,6 +415,8 @@ def tag_pii_in_documents(
     backend=None,
     omlx_base_url=None,
     omlx_models=None,
+    omlx_api_key=None,
+    concurrency=None,
 ):
     """
     Convenience function to process a list of documents through a PII tagging model.
@@ -372,6 +433,9 @@ def tag_pii_in_documents(
             reachable oMLX server if one is found, else local transformers models.
         omlx_base_url (str): Base URL of the oMLX OpenAI-compatible server.
         omlx_models (list): oMLX model names (name model, general model).
+        omlx_api_key (str): Optional bearer token for the oMLX server.
+        concurrency (int): Number of inference requests to run in parallel. None
+            (default) resolves to 8 for oMLX and 1 for transformers.
 
     Returns:
         list: List of documents with PII handled according to the specified mode.
@@ -381,6 +445,8 @@ def tag_pii_in_documents(
         backend=backend,
         omlx_base_url=omlx_base_url,
         omlx_models=omlx_models,
+        omlx_api_key=omlx_api_key,
+        concurrency=concurrency,
     )
     return redactor.tag_pii_in_documents(documents, mode=mode, locale=locale)
 
@@ -394,11 +460,18 @@ def clean_dataset(
     backend=None,
     omlx_base_url=None,
     omlx_models=None,
+    omlx_api_key=None,
+    concurrency=None,
+    batch_size=None,
 ):
     """
     Reads a JSONL dataset and processes the 'content' field in each message.
     Processes JSON objects, updates them with the processed messages,
     and writes them immediately to the output file. This allows progress to be saved incrementally.
+
+    Lines are read in batches and every message in a batch is tagged in one
+    concurrent call, so the thread pool is kept busy across documents while
+    output is still flushed after each batch.
 
     Args:
         input_filename (str): Path to the input JSONL file.
@@ -413,24 +486,42 @@ def clean_dataset(
             reachable oMLX server if one is found, else local transformers models.
         omlx_base_url (str): Base URL of the oMLX OpenAI-compatible server.
         omlx_models (list): oMLX model names (name model, general model).
+        omlx_api_key (str): Optional bearer token for the oMLX server.
+        concurrency (int): Number of parallel inference requests. None (default)
+            resolves to 8 for oMLX and 1 for transformers.
+        batch_size (int): Number of JSONL lines processed per concurrent call.
+            None (default) uses ``max(16, concurrency * 4)``.
     """
     redactor = PIIRedactor(
         device=device,
         backend=backend,
         omlx_base_url=omlx_base_url,
         omlx_models=omlx_models,
+        omlx_api_key=omlx_api_key,
+        concurrency=concurrency,
     )
+
+    if batch_size is None:
+        batch_size = max(16, redactor._resolve_concurrency() * 4)
+    batch_size = max(1, int(batch_size))
 
     with open(input_filename, "r") as f:
         num_lines = sum(1 for line in f)
 
     with open(input_filename, "r") as fin, open(output_filename, "w") as fout:
+        batch = []
         for line in tqdm(fin, total=num_lines):
-            json_obj = json.loads(line.strip())
-
-            process_and_write_batch(
-                [json_obj], fout, redactor, mode=mode, locale=locale
-            )
+            line = line.strip()
+            if not line:
+                continue
+            batch.append(json.loads(line))
+            if len(batch) >= batch_size:
+                process_and_write_batch(
+                    batch, fout, redactor, mode=mode, locale=locale
+                )
+                batch = []
+        if batch:
+            process_and_write_batch(batch, fout, redactor, mode=mode, locale=locale)
 
 
 def process_and_write_batch(

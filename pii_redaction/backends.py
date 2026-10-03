@@ -15,10 +15,14 @@ Two backends ship with the package:
   and the server applies the chat template and runs generation.
 
 Both backends expose the same tiny interface (``tag`` / ``tag_batch``), so the
-rest of the package is backend-agnostic.
+rest of the package is backend-agnostic. Both are safe to call from multiple
+threads (the oMLX backend keeps one pooled ``requests.Session`` per thread; the
+transformers backend serializes ``generate`` with a lock, since a single torch
+model is not reentrant).
 """
 
 import os
+import threading
 from typing import List, Optional
 
 #: Default base URL for the oMLX OpenAI-compatible API.
@@ -26,6 +30,9 @@ DEFAULT_OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://localhost:8000/v
 
 #: Generation budget, matching the transformers backend's ``max_new_tokens``.
 DEFAULT_MAX_NEW_TOKENS = 1024
+
+#: Default number of in-flight requests when the oMLX backend is used.
+DEFAULT_OMLX_CONCURRENCY = 8
 
 
 class BackendError(RuntimeError):
@@ -46,7 +53,11 @@ class InferenceBackend:
 
 
 class TransformersBackend(InferenceBackend):
-    """Local torch/transformers inference (the original OpenPipe path)."""
+    """Local torch/transformers inference (the original OpenPipe path).
+
+    A single torch model is not reentrant, so ``generate`` is guarded by a lock;
+    concurrent callers are serialized rather than corrupting the model state.
+    """
 
     name = "transformers"
 
@@ -65,6 +76,7 @@ class TransformersBackend(InferenceBackend):
         self.model = AutoModelForCausalLM.from_pretrained(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="left")
         self.tokenizer.padding_side = "left"
+        self._lock = threading.Lock()
 
         if device:
             self.model = self.model.to(device)
@@ -87,7 +99,8 @@ class TransformersBackend(InferenceBackend):
         input_ids = encoded_input["input_ids"].to(self.model.device)
         attention_mask = encoded_input["attention_mask"].to(self.model.device)
 
-        with torch.no_grad():
+        # A single torch model is not safe to generate from concurrently.
+        with self._lock, torch.no_grad():
             outputs = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -105,7 +118,8 @@ class OMLXBackend(InferenceBackend):
 
     The oMLX HTTP API is stateless; the chat template and generation both happen
     server-side, so this backend only has to forward the prompt and read the
-    assistant message back.
+    assistant message back. Each thread gets its own pooled ``requests.Session``
+    so concurrent requests reuse connections without sharing session state.
     """
 
     name = "omlx"
@@ -117,9 +131,11 @@ class OMLXBackend(InferenceBackend):
         api_key: Optional[str] = None,
         timeout: float = 300.0,
         max_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+        concurrency: int = DEFAULT_OMLX_CONCURRENCY,
     ):
         try:
             import requests
+            from requests.adapters import HTTPAdapter
         except ImportError as exc:  # pragma: no cover - depends on env
             raise BackendError(
                 "The oMLX backend requires the 'requests' package. "
@@ -128,11 +144,14 @@ class OMLXBackend(InferenceBackend):
             ) from exc
 
         self._requests = requests
+        self._HTTPAdapter = HTTPAdapter
         self.model = model
         self.base_url = (base_url or DEFAULT_OMLX_BASE_URL).rstrip("/")
         self.api_key = api_key or os.environ.get("OMLX_API_KEY")
         self.timeout = timeout
         self.max_tokens = max_tokens
+        self.concurrency = max(1, int(concurrency))
+        self._local = threading.local()
 
     @property
     def _headers(self):
@@ -140,6 +159,21 @@ class OMLXBackend(InferenceBackend):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
+
+    def _session(self):
+        """Return this thread's ``requests.Session``, creating it on first use."""
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._requests.Session()
+            adapter = self._HTTPAdapter(
+                pool_connections=self.concurrency,
+                pool_maxsize=self.concurrency,
+                max_retries=0,
+            )
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            self._local.session = session
+        return session
 
     def tag(self, text: str) -> str:
         url = f"{self.base_url}/chat/completions"
@@ -152,7 +186,7 @@ class OMLXBackend(InferenceBackend):
         }
 
         try:
-            response = self._requests.post(
+            response = self._session().post(
                 url, json=payload, headers=self._headers, timeout=self.timeout
             )
         except Exception as exc:  # requests.exceptions.RequestException

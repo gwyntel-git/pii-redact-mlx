@@ -37,6 +37,13 @@ def add_backend_args(parser):
         default="PII-Redact-General",
         help="oMLX model name for the general model (default: PII-Redact-General)",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="Number of inference requests to run in parallel (default: 8 for the "
+        "omlx backend, 1 for transformers). (env: PII_REDACT_CONCURRENCY)",
+    )
 
 
 def _omlx_models(args):
@@ -88,6 +95,13 @@ def main():
     jsonl_parser.add_argument(
         "--device", help="Device to use for processing (e.g., cuda, cpu, mps)"
     )
+    jsonl_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Number of JSONL lines processed per concurrent batch "
+        "(default: max(16, concurrency * 4))",
+    )
     add_pii_handling_args(jsonl_parser)
     add_backend_args(jsonl_parser)
 
@@ -127,6 +141,8 @@ def main():
                 backend=args.backend,
                 omlx_base_url=args.omlx_url,
                 omlx_models=_omlx_models(args),
+                concurrency=args.concurrency,
+                batch_size=args.batch_size,
             )
         elif args.command == "process-text":
             with open(args.input, "r") as f:
@@ -140,6 +156,7 @@ def main():
                 backend=args.backend,
                 omlx_base_url=args.omlx_url,
                 omlx_models=_omlx_models(args),
+                concurrency=args.concurrency,
             )
 
             with open(args.output, "w") as f:
