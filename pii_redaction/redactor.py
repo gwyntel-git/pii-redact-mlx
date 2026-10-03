@@ -1,13 +1,18 @@
-import torch
 import re
 import json
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import os
 from collections import defaultdict
 import difflib
 from enum import Enum
 from .faker_utils import FakePIIGenerator
+from .backends import (
+    DEFAULT_OMLX_BASE_URL,
+    BackendError,
+    OMLXBackend,
+    TransformersBackend,
+    omlx_server_available,
+)
 
 
 class PIIHandlingMode(Enum):
@@ -212,39 +217,90 @@ def apply_tags(
 
 
 class PIIRedactor:
-    def __init__(self, device=None):
+    def __init__(
+        self,
+        device=None,
+        backend=None,
+        model_paths=None,
+        focus_tags=None,
+        omlx_base_url=None,
+        omlx_models=None,
+        omlx_api_key=None,
+    ):
         """
         Initialize the PIIRedactor with models for PII detection.
 
         Args:
-            device (str): Device to use for inference (e.g., 'cuda', 'cpu')
+            device (str): Device for the 'transformers' backend (e.g. 'cuda', 'cpu', 'mps').
+            backend (str): Inference backend -- 'auto' (default), 'transformers', or 'omlx'.
+                'auto' uses a reachable oMLX server when one is found, otherwise falls
+                back to the local 'transformers' models. Also read from the
+                PII_REDACT_BACKEND environment variable.
+            model_paths (list): HuggingFace repo ids/paths used by the 'transformers' backend.
+            focus_tags (list): Per-model tag allow-lists (None = keep every tag).
+            omlx_base_url (str): Base URL of the oMLX OpenAI-compatible server,
+                e.g. 'http://localhost:8000/v1'. Falls back to the OMLX_BASE_URL
+                environment variable, then 'http://localhost:8000/v1'.
+            omlx_models (list): oMLX model names, one per entry in model_paths.
+            omlx_api_key (str): Optional bearer token for the oMLX server. Falls back
+                to the OMLX_API_KEY environment variable.
         """
 
-        self.model_paths = ["OpenPipe/Pii-Redact-Name", "OpenPipe/Pii-Redact-General"]
-        self.focus_tags = [["person_name", "organization_name"]] + [None] * (
-            len(self.model_paths) - 1
+        self.model_paths = model_paths or [
+            "OpenPipe/Pii-Redact-Name",
+            "OpenPipe/Pii-Redact-General",
+        ]
+        self.omlx_models = omlx_models or [
+            "PII-Redact-Name",
+            "PII-Redact-General",
+        ]
+        self.focus_tags = focus_tags or (
+            [["person_name", "organization_name"]] + [None] * (len(self.model_paths) - 1)
         )
 
         self.device = device
+        self.omlx_base_url = (
+            omlx_base_url or os.environ.get("OMLX_BASE_URL") or DEFAULT_OMLX_BASE_URL
+        )
+        self.omlx_api_key = omlx_api_key or os.environ.get("OMLX_API_KEY")
+        self.requested_backend = (
+            backend or os.environ.get("PII_REDACT_BACKEND") or "auto"
+        )
 
-        self.models = [None] * len(self.model_paths)
-        self.tokenizers = [None] * len(self.model_paths)
+        # Resolved on first model call: 'auto' -> 'omlx' or 'transformers'.
+        self.backend = None
+
+        # Lazily-initialized inference backends, one per model role.
+        self.models: list = [None] * len(self.model_paths)
+
+    def _resolve_backend(self):
+        """Resolve the 'auto' backend choice to a concrete backend name."""
+        if self.requested_backend in (None, "", "auto"):
+            return "omlx" if omlx_server_available(self.omlx_base_url) else "transformers"
+        return self.requested_backend
 
     def _initialize_model(self, index):
-        """Initialize a specific model if it hasn't been already."""
-        if self.models[index] is None:
-            self.models[index] = AutoModelForCausalLM.from_pretrained(
-                self.model_paths[index]
-            )
-            self.tokenizers[index] = AutoTokenizer.from_pretrained(
-                self.model_paths[index], padding_side="left"
-            )
-            self.tokenizers[index].padding_side = "left"
+        """Initialize a specific model backend if it hasn't been already."""
+        if self.models[index] is not None:
+            return
 
-            if self.device:
-                self.models[index] = self.models[index].to(self.device)
-            elif torch.cuda.is_available():
-                self.models[index] = self.models[index].to("cuda")
+        if self.backend is None:
+            self.backend = self._resolve_backend()
+
+        if self.backend == "omlx":
+            self.models[index] = OMLXBackend(
+                model=self.omlx_models[index],
+                base_url=self.omlx_base_url,
+                api_key=self.omlx_api_key,
+            )
+        elif self.backend == "transformers":
+            self.models[index] = TransformersBackend(
+                self.model_paths[index], device=self.device
+            )
+        else:
+            raise ValueError(
+                f"Unknown backend {self.backend!r}: choose 'auto', 'transformers' or 'omlx'."
+            )
 
     def _model_call(self, text, model_index):
         """
@@ -258,33 +314,7 @@ class PIIRedactor:
             str: The processed text with PII tags
         """
         self._initialize_model(model_index)
-
-        model = self.models[model_index]
-        tokenizer = self.tokenizers[model_index]
-
-        tokenizer.padding_side = "left"
-        tokenizer.pad_token = tokenizer.eos_token
-
-        messages = [{"role": "user", "content": text}]
-
-        encoded_input = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_dict=True, return_tensors="pt"
-        )
-
-        input_ids = encoded_input["input_ids"].to(model.device)
-        attention_mask = encoded_input["attention_mask"].to(model.device)
-
-        with torch.no_grad():
-            outputs = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=1024,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-
-        input_length = encoded_input["input_ids"].size(1)
-        generated_ids = outputs[0][input_length:]
-        return tokenizer.decode(generated_ids, skip_special_tokens=True)
+        return self.models[model_index].tag(text)
 
     def tag_pii_in_documents(self, documents, mode=PIIHandlingMode.TAG, locale="en_US"):
         """
@@ -319,24 +349,39 @@ class PIIRedactor:
 
 
 def tag_pii_in_documents(
-    documents, device=None, mode=PIIHandlingMode.TAG, locale="en_US"
+    documents,
+    device=None,
+    mode=PIIHandlingMode.TAG,
+    locale="en_US",
+    backend=None,
+    omlx_base_url=None,
+    omlx_models=None,
 ):
     """
     Convenience function to process a list of documents through a PII tagging model.
 
     Args:
         documents (list): List of text documents to process.
-        device (str): Device to use for processing (e.g., 'cuda', 'cpu').
+        device (str): Device for the 'transformers' backend (e.g. 'cuda', 'cpu').
         mode (PIIHandlingMode): How to handle identified PII:
             - TAG: Keep PII with XML tags
             - REDACT: Replace PII with empty tags
             - REPLACE: Replace PII with fake data
         locale (str): Locale for generating fake data (only used if mode=REPLACE)
+        backend (str): 'auto' (default), 'transformers', or 'omlx'. 'auto' uses a
+            reachable oMLX server if one is found, else local transformers models.
+        omlx_base_url (str): Base URL of the oMLX OpenAI-compatible server.
+        omlx_models (list): oMLX model names (name model, general model).
 
     Returns:
         list: List of documents with PII handled according to the specified mode.
     """
-    redactor = PIIRedactor(device=device)
+    redactor = PIIRedactor(
+        device=device,
+        backend=backend,
+        omlx_base_url=omlx_base_url,
+        omlx_models=omlx_models,
+    )
     return redactor.tag_pii_in_documents(documents, mode=mode, locale=locale)
 
 
@@ -346,6 +391,9 @@ def clean_dataset(
     device=None,
     mode=PIIHandlingMode.TAG,
     locale="en_US",
+    backend=None,
+    omlx_base_url=None,
+    omlx_models=None,
 ):
     """
     Reads a JSONL dataset and processes the 'content' field in each message.
@@ -355,14 +403,23 @@ def clean_dataset(
     Args:
         input_filename (str): Path to the input JSONL file.
         output_filename (str): Path to the output JSONL file.
-        device (str): Device to use for processing (e.g., 'cuda', 'cpu').
+        device (str): Device for the 'transformers' backend (e.g. 'cuda', 'cpu').
         mode (PIIHandlingMode): How to handle identified PII:
             - TAG: Keep PII with XML tags
             - REDACT: Replace PII with empty tags
             - REPLACE: Replace PII with fake data
         locale (str): Locale for generating fake data (only used if mode=REPLACE)
+        backend (str): 'auto' (default), 'transformers', or 'omlx'. 'auto' uses a
+            reachable oMLX server if one is found, else local transformers models.
+        omlx_base_url (str): Base URL of the oMLX OpenAI-compatible server.
+        omlx_models (list): oMLX model names (name model, general model).
     """
-    redactor = PIIRedactor(device=device)
+    redactor = PIIRedactor(
+        device=device,
+        backend=backend,
+        omlx_base_url=omlx_base_url,
+        omlx_models=omlx_models,
+    )
 
     with open(input_filename, "r") as f:
         num_lines = sum(1 for line in f)

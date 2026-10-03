@@ -1,0 +1,208 @@
+"""
+Inference backends for PII redaction.
+
+Two backends ship with the package:
+
+* ``transformers`` -- the original torch/transformers path (CUDA, CPU, MPS).
+  Loads the ``OpenPipe/Pii-Redact-*`` checkpoints locally and generates with
+  ``model.generate``.
+
+* ``omlx`` -- talks to an `oMLX <https://github.com/lmstudio-ai>`_ server over
+  its OpenAI-compatible API (``/v1/chat/completions``). oMLX runs the same
+  checkpoints through Apple's MLX framework, so PII redaction works on Apple
+  Silicon without torch or a discrete GPU. Models are addressed by their served
+  name (``PII-Redact-Name`` / ``PII-Redact-General``) instead of a local path,
+  and the server applies the chat template and runs generation.
+
+Both backends expose the same tiny interface (``tag`` / ``tag_batch``), so the
+rest of the package is backend-agnostic.
+"""
+
+import os
+from typing import List, Optional
+
+#: Default base URL for the oMLX OpenAI-compatible API.
+DEFAULT_OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://localhost:8000/v1")
+
+#: Generation budget, matching the transformers backend's ``max_new_tokens``.
+DEFAULT_MAX_NEW_TOKENS = 1024
+
+
+class BackendError(RuntimeError):
+    """Raised when a backend cannot be initialized or a generation call fails."""
+
+
+class InferenceBackend:
+    """Minimal interface every backend implements."""
+
+    name = "base"
+
+    def tag(self, text: str) -> str:
+        """Return ``text`` annotated with ``<PII:type>...</PII:type>`` tags."""
+        raise NotImplementedError
+
+    def tag_batch(self, texts: List[str]) -> List[str]:
+        return [self.tag(t) for t in texts]
+
+
+class TransformersBackend(InferenceBackend):
+    """Local torch/transformers inference (the original OpenPipe path)."""
+
+    name = "transformers"
+
+    def __init__(self, model_path: str, device: Optional[str] = None):
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:  # pragma: no cover - depends on env
+            raise BackendError(
+                "The 'transformers' backend requires torch and transformers. "
+                "Install them with `pip install 'pii-redact-mlx[transformers]'`, "
+                "or use the oMLX backend instead (`--backend omlx`)."
+            ) from exc
+
+        self._torch = torch
+        self.model = AutoModelForCausalLM.from_pretrained(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="left")
+        self.tokenizer.padding_side = "left"
+
+        if device:
+            self.model = self.model.to(device)
+        elif torch.cuda.is_available():
+            self.model = self.model.to("cuda")
+
+    def tag(self, text: str) -> str:
+        torch = self._torch
+        tokenizer = self.tokenizer
+
+        tokenizer.padding_side = "left"
+        tokenizer.pad_token = tokenizer.eos_token
+
+        messages = [{"role": "user", "content": text}]
+
+        encoded_input = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_dict=True, return_tensors="pt"
+        )
+
+        input_ids = encoded_input["input_ids"].to(self.model.device)
+        attention_mask = encoded_input["attention_mask"].to(self.model.device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        input_length = encoded_input["input_ids"].size(1)
+        generated_ids = outputs[0][input_length:]
+        return tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+
+class OMLXBackend(InferenceBackend):
+    """MLX inference served by an oMLX OpenAI-compatible endpoint.
+
+    The oMLX HTTP API is stateless; the chat template and generation both happen
+    server-side, so this backend only has to forward the prompt and read the
+    assistant message back.
+    """
+
+    name = "omlx"
+
+    def __init__(
+        self,
+        model: str,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        timeout: float = 300.0,
+        max_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+    ):
+        try:
+            import requests
+        except ImportError as exc:  # pragma: no cover - depends on env
+            raise BackendError(
+                "The oMLX backend requires the 'requests' package. "
+                "Install it with `pip install requests` (it is a core dependency "
+                "of pii-redact-mlx)."
+            ) from exc
+
+        self._requests = requests
+        self.model = model
+        self.base_url = (base_url or DEFAULT_OMLX_BASE_URL).rstrip("/")
+        self.api_key = api_key or os.environ.get("OMLX_API_KEY")
+        self.timeout = timeout
+        self.max_tokens = max_tokens
+
+    @property
+    def _headers(self):
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def tag(self, text: str) -> str:
+        url = f"{self.base_url}/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": text}],
+            "max_tokens": self.max_tokens,
+            "temperature": 0,
+            "stream": False,
+        }
+
+        try:
+            response = self._requests.post(
+                url, json=payload, headers=self._headers, timeout=self.timeout
+            )
+        except Exception as exc:  # requests.exceptions.RequestException
+            raise BackendError(
+                f"Could not reach the oMLX server at {self.base_url}: {exc}. "
+                "Is oMLX running (e.g. `omlx-cli serve ...`)?"
+            ) from exc
+
+        if response.status_code != 200:
+            raise BackendError(
+                f"oMLX server error {response.status_code} for model "
+                f"{self.model!r}: {response.text[:500]}"
+            )
+
+        data = response.json()
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as exc:
+            raise BackendError(
+                f"Unexpected response from oMLX server: {str(data)[:500]}"
+            ) from exc
+
+
+def omlx_server_available(
+    base_url: Optional[str] = None, timeout: float = 2.0
+) -> bool:
+    """Return True if an oMLX server answers on ``base_url`` (GET /models)."""
+    try:
+        import requests
+    except ImportError:
+        return False
+
+    url = (base_url or DEFAULT_OMLX_BASE_URL).rstrip("/") + "/models"
+    try:
+        response = requests.get(url, timeout=timeout)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def list_omlx_models(base_url: Optional[str] = None, timeout: float = 5.0):
+    """Return the list of model ids served by an oMLX server."""
+    try:
+        import requests
+    except ImportError as exc:
+        raise BackendError(
+            "Listing oMLX models requires the 'requests' package."
+        ) from exc
+
+    url = (base_url or DEFAULT_OMLX_BASE_URL).rstrip("/") + "/models"
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return [m["id"] for m in response.json().get("data", [])]
