@@ -4,7 +4,7 @@ A Python package for redacting Personally Identifiable Information (PII) from te
 
 > **This is a fork of [OpenPipe/pii-redaction](https://github.com/OpenPipe/pii-redaction)** that adds an
 > **MLX backend** so the same models run natively on Apple Silicon via
-> [oMLX](https://github.com/lmstudio-ai), with **no torch, CUDA, or GPU required**.
+> [oMLX](https://github.com/jundot/omlx), with **no torch, CUDA, or GPU required**.
 > The original `transformers` path is preserved and selected automatically when no
 > oMLX server is reachable.
 >

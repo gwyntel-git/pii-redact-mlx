@@ -7,7 +7,7 @@ Two backends ship with the package:
   Loads the ``OpenPipe/Pii-Redact-*`` checkpoints locally and generates with
   ``model.generate``.
 
-* ``omlx`` -- talks to an `oMLX <https://github.com/lmstudio-ai>`_ server over
+* ``omlx`` -- talks to an `oMLX <https://github.com/jundot/omlx>`_ server over
   its OpenAI-compatible API (``/v1/chat/completions``). oMLX runs the same
   checkpoints through Apple's MLX framework, so PII redaction works on Apple
   Silicon without torch or a discrete GPU. Models are addressed by their served

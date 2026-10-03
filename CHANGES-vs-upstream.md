@@ -54,7 +54,7 @@ The fork introduces an `InferenceBackend` interface with two implementations:
   imported **lazily inside the constructor**. Importing the package no longer
   requires torch, and a missing torch produces a clear error that names the
   install extra rather than an `ImportError` traceback.
-- **`OMLXBackend`** — talks to an [oMLX](https://github.com/lmstudio-ai) server
+- **`OMLXBackend`** — talks to an [oMLX](https://github.com/jundot/omlx) server
   over its OpenAI-compatible API (`POST /v1/chat/completions`). The server loads
   the same `OpenPipe/PII-Redact-*` checkpoints through **MLX**, applies the chat
   template, and runs generation. The client is pure `requests`: no torch, no
