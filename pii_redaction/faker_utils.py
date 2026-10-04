@@ -2,6 +2,7 @@
 Utilities for generating fake PII data to replace redacted content using the Faker library.
 """
 
+import hashlib
 from faker import Faker
 from typing import Dict
 
@@ -66,6 +67,15 @@ class FakePIIGenerator:
         # Check if we've already generated a fake value for this original value
         if original_value in self.memory[category]:
             return self.memory[category][original_value]
+
+        # Deterministic: seed from hash of (category, original) so the same
+        # real PII always maps to the same fake PII — across chunks, runs,
+        # and processes. (Claire's fork: stable fake identities.)
+        seed = int.from_bytes(
+            hashlib.sha256(f"{category}:{original_value}".encode()).digest()[:8],
+            "big",
+        )
+        self.faker.seed_instance(seed)
 
         # Generate a new fake value
         method_name = f"_generate_{category.lower()}"
