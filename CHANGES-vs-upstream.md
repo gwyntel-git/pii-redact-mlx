@@ -120,6 +120,28 @@ pii-redact list-models --omlx-url http://localhost:27473/v1 --omlx-api-key-file 
 Resolution order is `--omlx-api-key-file` (→ `OMLX_API_KEY_FILE`) → `OMLX_API_KEY`
 → none. The key file is a plain path; the key value is never an argv entry.
 
+## 3b. Client read timeout (`OMLX_TIMEOUT`)
+
+The `omlx` backend talks to a **non-streamed** `/chat/completions` endpoint, so
+the HTTP read timeout covers the *entire* generation rather than the gap between
+bytes. These models echo their input, so a chunk of `N` tokens yields roughly
+`1.5N` — and when several slots share one GPU, each individual request gets
+correspondingly slower. With batch redaction of long documents a single request
+can therefore far exceed the old hard-coded 300 s, which surfaced as:
+
+```
+Read timed out. (read timeout=300.0)
+```
+
+The timeout is now `OMLX_TIMEOUT` (seconds, default 300). It is read **at backend
+construction**, not at module import: a module-level read would freeze the value
+on first import, making the override depend on import *order* — set the variable
+after `backends` is imported and the assignment is silently missed, the 300 s
+default returns, and a long run dies on the very error the override exists to
+prevent. An explicit `timeout=` argument to `OMLXBackend` still wins over the
+environment, and blank, non-numeric, or non-positive values fall back to 300 s
+rather than raising.
+
 ## 4. `convert-traces` — trace JSONL → redacted OpenAI JSONL
 
 New command for the pipeline this fork was written for: a gateway/proxy trace log
@@ -209,6 +231,7 @@ behaviour rather than quantisation damage.
 |---|---|---|---|
 | oMLX base URL | `OMLX_BASE_URL` | `--omlx-url` | `http://localhost:8000/v1` |
 | oMLX API key | `OMLX_API_KEY` / `OMLX_API_KEY_FILE` | `--omlx-api-key-file` | none |
+| oMLX read timeout | `OMLX_TIMEOUT` | `timeout=` to `OMLXBackend` | 300 s |
 | Backend | `PII_REDACT_BACKEND` | `--backend` | `auto` |
 | Concurrency | `PII_REDACT_CONCURRENCY` | `--concurrency` | 8 (omlx) / 1 (transformers) |
 

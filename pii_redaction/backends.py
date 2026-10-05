@@ -47,6 +47,38 @@ def _auto_max_tokens(text: str) -> int:
 #: Default number of in-flight requests when the oMLX backend is used.
 DEFAULT_OMLX_CONCURRENCY = 8
 
+#: Client read timeout for one /chat/completions call, overridable by env.
+#:
+#: The endpoint is NOT streamed, so this covers the ENTIRE generation, not the
+#: gap between bytes.  These models echo their input, so a chunk of N tokens
+#: produces roughly 1.5N -- and with several slots sharing one GPU each request
+#: is correspondingly slower.  A 6000-token chunk can therefore legitimately
+#: take far longer than the old 300s default, which surfaced as
+#:     Read timed out. (read timeout=300.0)
+#: and killed a run 61 minutes in, after it had already checkpointed 138 rows.
+DEFAULT_OMLX_TIMEOUT = 300.0
+
+
+def resolve_omlx_timeout() -> float:
+    """Read ``OMLX_TIMEOUT`` at CALL time rather than at import time.
+
+    Reading the environment in a module-level assignment freezes the value on
+    first import, which makes the override depend on import ORDER: set the
+    variable after ``backends`` has been imported and the assignment is
+    silently missed, the 300s default comes back, and a run dies 61 minutes in
+    with the very timeout error the override exists to prevent. Resolving it
+    here means the env var works whether it is exported before the process
+    starts or assigned in-process before the backend is constructed.
+    """
+    raw = os.environ.get("OMLX_TIMEOUT")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_OMLX_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_OMLX_TIMEOUT
+    return value if value > 0 else DEFAULT_OMLX_TIMEOUT
+
 
 class BackendError(RuntimeError):
     """Raised when a backend cannot be initialized or a generation call fails."""
@@ -174,7 +206,7 @@ class OMLXBackend(InferenceBackend):
         model: str,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        timeout: float = 300.0,
+        timeout: Optional[float] = None,
         max_tokens: Optional[int] = DEFAULT_MAX_NEW_TOKENS,
         concurrency: int = DEFAULT_OMLX_CONCURRENCY,
     ):
@@ -193,7 +225,9 @@ class OMLXBackend(InferenceBackend):
         self.model = model
         self.base_url = (base_url or DEFAULT_OMLX_BASE_URL).rstrip("/")
         self.api_key = resolve_api_key(api_key)
-        self.timeout = timeout
+        # Resolve here, not at import: an explicit argument wins, otherwise the
+        # env var is read now (see resolve_omlx_timeout for why not at import).
+        self.timeout = resolve_omlx_timeout() if timeout is None else float(timeout)
         self.max_tokens = max_tokens
         self.concurrency = max(1, int(concurrency))
         self._local = threading.local()
