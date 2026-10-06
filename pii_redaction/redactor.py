@@ -84,6 +84,12 @@ def parse_tagged_string(tagged_str):
                 closing_index = tagged_str.find(closing_tag, i)
 
                 if closing_index == -1:
+                    # An open tag with no closing tag.  If that tag ends the
+                    # string (a truncated echo -- the model stopped mid-tag)
+                    # there is nothing left to copy, and indexing would raise
+                    # IndexError and kill the whole run.
+                    if i >= len(tagged_str):
+                        break
                     clean_str += tagged_str[i]
                     clean_index += 1
                     i += 1
